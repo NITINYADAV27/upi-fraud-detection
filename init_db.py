@@ -1,7 +1,12 @@
-from app.core.database import engine, Base
+from app.core.database import Base, engine
 from app.models.audit_log import AuditLog
 
-print("Creating database tables...")
-Base.metadata.create_all(bind=engine)
-print("Done.")
+def init():
+    Base.metadata.create_all(bind=engine)
+    print("Database initialized at fraud_audit.db")
+
+if __name__ == "__main__":
+    init()
+
+
 
