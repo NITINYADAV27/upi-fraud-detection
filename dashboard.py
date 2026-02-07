@@ -1,84 +1,50 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
+import time
 
-from app.core.config import DB_PATH
+st.set_page_config(page_title="UPI Fraud Analytics", layout="wide")
 
-# -----------------------------------
-# Page config
-# -----------------------------------
-st.set_page_config(
-    page_title="UPI Fraud Analytics Dashboard",
-    layout="wide"
-)
+DB_PATH = "fraud_audit.db"
 
-st.title("🛡️ UPI Fraud Analytics Dashboard")
-
-# -----------------------------------
-# Load data safely from SAME DB
-# -----------------------------------
 @st.cache_data(ttl=5)
 def load_data():
     try:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(DB_PATH)
         df = pd.read_sql(
-            "SELECT * FROM audit_logs ORDER BY timestamp DESC",
+            "SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 50",
             conn
         )
         conn.close()
         return df
-    except Exception as e:
-        # If table/db not ready yet
+    except Exception:
         return pd.DataFrame()
 
-# -----------------------------------
-# Fetch data
-# -----------------------------------
+
+st.title("🛡️ UPI Fraud Analytics Dashboard")
+
 df = load_data()
 
-# -----------------------------------
-# Metrics
-# -----------------------------------
 col1, col2, col3 = st.columns(3)
 
-with col1:
-    st.metric("Total Transactions", len(df))
-
-with col2:
-    if not df.empty:
-        st.metric(
-            "Fraud Transactions",
-            len(df[df["decision"] == "BLOCK"])
-        )
-    else:
-        st.metric("Fraud Transactions", 0)
-
-with col3:
-    if not df.empty:
-        fraud_rate = (
-            len(df[df["decision"] == "BLOCK"]) / len(df)
-        ) * 100
-        st.metric("Fraud Rate (%)", f"{fraud_rate:.2f}")
-    else:
-        st.metric("Fraud Rate (%)", "0.00")
+col1.metric("Total Transactions", len(df))
+col2.metric("Fraud Transactions", len(df[df["decision"] == "BLOCK"]) if not df.empty else 0)
+col3.metric(
+    "Fraud Rate (%)",
+    round((len(df[df["decision"] == "BLOCK"]) / len(df)) * 100, 2)
+    if len(df) > 0 else 0
+)
 
 st.divider()
 
-# -----------------------------------
-# Transactions Table
-# -----------------------------------
 st.subheader("📄 Recent Transactions")
 
 if df.empty:
-    st.info("No transactions found yet. Send a transaction from Swagger.")
+    st.info("No transactions found yet. Send transactions from Swagger.")
 else:
-    st.dataframe(
-        df,
-        use_container_width=True,
-        height=400
-    )
+    st.dataframe(df, use_container_width=True)
 
-# -----------------------------------
-# Auto refresh note
-# -----------------------------------
-st.caption("⏱️ Dashboard auto-refreshes every 5 seconds")
+st.caption("Dashboard auto-refreshes every 5 seconds")
+time.sleep(5)
+st.rerun()
+
