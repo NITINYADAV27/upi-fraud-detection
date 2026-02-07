@@ -2,30 +2,27 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from app.core.config import DATABASE_URL
 
-# SQLAlchemy engine
+# SQLite needs this
+connect_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False}
-    if DATABASE_URL.startswith("sqlite")
-    else {}
+    connect_args=connect_args
 )
 
-# Session factory
 SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
     bind=engine
 )
 
-# Base class for models
+# 🔥 THIS WAS MISSING EARLIER
 Base = declarative_base()
 
 
 def get_db():
-    """
-    Dependency for FastAPI routes.
-    Provides a database session and closes it after use.
-    """
     db = SessionLocal()
     try:
         yield db
