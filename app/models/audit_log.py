@@ -15,11 +15,10 @@ class AuditLog(Base):
     sender_vpa = Column(String)
     receiver_vpa = Column(String)
 
-    risk_score = Column(Integer)      # ✅ ADD THIS
-    decision = Column(String)
+    risk_score = Column(Integer)
+    confidence = Column(Float)      # ✅ ADD THIS LINE
 
+    decision = Column(String)
     reason = Column(String, nullable=True)
 
     timestamp = Column(DateTime, default=datetime.utcnow)
-
-
