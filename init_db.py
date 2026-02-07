@@ -1,23 +1,7 @@
-import sqlite3
-from app.core.config import DB_PATH
+from app.core.database import engine, Base
+from app.models.audit_log import AuditLog
 
-conn = sqlite3.connect(DB_PATH)
-cur = conn.cursor()
+print("Creating database tables...")
+Base.metadata.create_all(bind=engine)
+print("Done.")
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS audit_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tx_id TEXT,
-    amount REAL,
-    sender_vpa TEXT,
-    receiver_vpa TEXT,
-    decision TEXT,
-    risk_score INTEGER,
-    timestamp TEXT
-)
-""")
-
-conn.commit()
-conn.close()
-
-print("DB initialized:", DB_PATH)
