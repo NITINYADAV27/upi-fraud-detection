@@ -1,50 +1,32 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-import time
+import os
 
-st.set_page_config(page_title="UPI Fraud Analytics", layout="wide")
+DB_PATH = os.path.join(os.path.dirname(__file__), "fraud_audit.db")
 
-DB_PATH = "fraud_audit.db"
+st.set_page_config(page_title="UPI Fraud Analytics Dashboard", layout="wide")
+st.title("🛡️ UPI Fraud Analytics Dashboard")
 
 @st.cache_data(ttl=5)
 def load_data():
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        df = pd.read_sql(
-            "SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 50",
-            conn
-        )
-        conn.close()
-        return df
-    except Exception:
-        return pd.DataFrame()
-
-
-st.title("🛡️ UPI Fraud Analytics Dashboard")
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql("SELECT * FROM audit_logs ORDER BY timestamp DESC", conn)
+    conn.close()
+    return df
 
 df = load_data()
 
-col1, col2, col3 = st.columns(3)
+st.metric("Total Transactions", len(df))
+st.metric("Fraud Transactions", len(df[df["decision"] == "BLOCK"]))
 
-col1.metric("Total Transactions", len(df))
-col2.metric("Fraud Transactions", len(df[df["decision"] == "BLOCK"]) if not df.empty else 0)
-col3.metric(
-    "Fraud Rate (%)",
-    round((len(df[df["decision"] == "BLOCK"]) / len(df)) * 100, 2)
-    if len(df) > 0 else 0
-)
-
-st.divider()
-
-st.subheader("📄 Recent Transactions")
+st.subheader("Recent Transactions")
 
 if df.empty:
-    st.info("No transactions found yet. Send transactions from Swagger.")
+    st.warning("No transactions yet. Send from Swagger.")
 else:
     st.dataframe(df, use_container_width=True)
 
-st.caption("Dashboard auto-refreshes every 5 seconds")
-time.sleep(5)
-st.rerun()
+st.caption("Auto-refresh every 5 seconds")
+
 
