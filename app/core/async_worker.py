@@ -12,11 +12,11 @@ engine = ProductionFraudEngine()
 
 def _extract_reason(result: dict):
     """
-    Converts internal risk factors into a single DB-safe reason string.
+    Convert internal risk factors into a single DB-safe reason string.
     """
-    if "top_risk_factors" in result and result["top_risk_factors"]:
+    if result.get("top_risk_factors"):
         return ",".join(result["top_risk_factors"])
-    if "reason" in result:
+    if result.get("reason"):
         return result["reason"]
     return None
 
@@ -84,13 +84,16 @@ def worker_loop():
             # --------------------------------------------------
             result = engine.evaluate_transaction(tx)
 
-            if result.get("action") == "BLOCK":
+            # ✅ SAFE normalization (action OR decision)
+            decision = result.get("action") or result.get("decision")
+
+            if decision == "BLOCK":
                 increase_risk(tx.sender_vpa, tx.receiver_vpa, 25)
 
             log_decision(
                 tx=tx,
                 result={
-                    "decision": result["action"],
+                    "decision": decision,              # ✅ FIXED
                     "risk_score": result["risk_score"],
                     "confidence": result["confidence"],
                     "reason": _extract_reason(result)
@@ -108,5 +111,6 @@ def worker_loop():
 def start_worker():
     t = threading.Thread(target=worker_loop, daemon=True)
     t.start()
+
 
 
