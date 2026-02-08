@@ -153,3 +153,9 @@ def analytics_decision_split():
 def analytics_risk_distribution():
     txs = [json.loads(t) for t in redis_client.lrange(REDIS_TX_KEY, 0, -1)]
     return [t.get("risk_score", 0) for t in txs]
+from app.core.redis_client import fetch_recent_transactions
+
+@app.get("/api/transactions")
+def get_transactions(limit: int = 100):
+    return fetch_recent_transactions(limit)
+
