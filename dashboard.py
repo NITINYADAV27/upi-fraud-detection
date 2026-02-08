@@ -5,7 +5,7 @@ import pandas as pd
 # --------------------------------------------------
 # CONFIG
 # --------------------------------------------------
-BACKEND_URL = "http://127.0.0.1:8000"   # 🔴 CHANGE THIS
+BACKEND_URL = "https://upi-fraud-detection-7bot.onrender.com/"   # 🔴 CHANGE THIS
 REFRESH_SEC = 5
 
 st.set_page_config(
@@ -78,4 +78,6 @@ else:
     st.dataframe(df, use_container_width=True)
 
 st.caption(f"Auto-refresh every {REFRESH_SEC} seconds")
+
+
 
