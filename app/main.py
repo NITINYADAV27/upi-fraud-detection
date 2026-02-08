@@ -1,13 +1,14 @@
 from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional
 from datetime import datetime
 import json
+import os
 
 from app.core.async_queue import transaction_queue
 from app.core.async_worker import start_worker
-from app.core.redis_client import redis_client   # already exists in your project
+from app.core.redis_client import redis_client
 
 # --------------------------------------------------
 # App init
@@ -18,7 +19,7 @@ app = FastAPI(
 )
 
 # --------------------------------------------------
-# CORS (REQUIRED for frontend & Render)
+# CORS (for Streamlit & Render)
 # --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
@@ -31,7 +32,6 @@ app.add_middleware(
 # --------------------------------------------------
 # API Key security
 # --------------------------------------------------
-import os
 API_KEY = os.getenv("API_KEY", "upi_fraud_prod_2026_secure_key")
 
 def verify_api_key(x_api_key: Optional[str] = Header(None)):
@@ -59,14 +59,14 @@ class TransactionRequest(BaseModel):
     timestamp: Optional[str] = None
 
 # --------------------------------------------------
-# Startup – start async fraud worker
+# Startup – async worker
 # --------------------------------------------------
 @app.on_event("startup")
 def startup_event():
     start_worker()
 
 # --------------------------------------------------
-# Health check (IMPORTANT for Render)
+# Health check
 # --------------------------------------------------
 @app.get("/")
 def health_check():
@@ -77,7 +77,7 @@ def health_check():
     }
 
 # --------------------------------------------------
-# Decision API (ASYNC PRODUCER)
+# Decision API (producer)
 # --------------------------------------------------
 @app.post("/v1/decision")
 def submit_transaction(
@@ -103,28 +103,28 @@ def submit_transaction(
     }
 
 # ==================================================
-# 🔥 NEW — PRODUCT / DASHBOARD APIs (SAFE)
+# DASHBOARD / ANALYTICS APIs
 # ==================================================
 
-REDIS_TX_KEY = "transactions"   # already used by worker
+REDIS_TX_KEY = "recent_transactions"   # 🔥 MUST MATCH WORKER
 
 # --------------------------------------------------
-# Get all processed transactions (Frontend table)
+# Transactions (table)
 # --------------------------------------------------
 @app.get("/api/transactions")
 def get_transactions(limit: int = 200):
-    txs = redis_client.lrange(REDIS_TX_KEY, 0, limit)
-    return [json.loads(t) for t in txs]
+    raw = redis_client.lrange(REDIS_TX_KEY, 0, limit - 1)
+    return [json.loads(r) for r in raw]
 
 # --------------------------------------------------
-# Analytics: stats (metrics cards)
+# Analytics: stats
 # --------------------------------------------------
 @app.get("/api/analytics/stats")
 def analytics_stats():
-    txs = [json.loads(t) for t in redis_client.lrange(REDIS_TX_KEY, 0, -1)]
+    txs = [json.loads(r) for r in redis_client.lrange(REDIS_TX_KEY, 0, -1)]
 
     total = len(txs)
-    fraud = len([t for t in txs if t.get("decision") == "BLOCK"])
+    fraud = sum(1 for t in txs if t.get("decision") == "BLOCK")
     rate = round((fraud / total) * 100, 2) if total else 0
 
     return {
@@ -134,11 +134,11 @@ def analytics_stats():
     }
 
 # --------------------------------------------------
-# Analytics: decision split (chart)
+# Analytics: decision split
 # --------------------------------------------------
 @app.get("/api/analytics/decision-split")
 def analytics_decision_split():
-    txs = [json.loads(t) for t in redis_client.lrange(REDIS_TX_KEY, 0, -1)]
+    txs = [json.loads(r) for r in redis_client.lrange(REDIS_TX_KEY, 0, -1)]
 
     return {
         "ALLOW": sum(1 for t in txs if t.get("decision") == "ALLOW"),
@@ -147,15 +147,12 @@ def analytics_decision_split():
     }
 
 # --------------------------------------------------
-# Analytics: risk score distribution (chart)
+# Analytics: risk score distribution
 # --------------------------------------------------
 @app.get("/api/analytics/risk-distribution")
 def analytics_risk_distribution():
-    txs = [json.loads(t) for t in redis_client.lrange(REDIS_TX_KEY, 0, -1)]
+    txs = [json.loads(r) for r in redis_client.lrange(REDIS_TX_KEY, 0, -1)]
     return [t.get("risk_score", 0) for t in txs]
-from app.core.redis_client import fetch_recent_transactions
 
-@app.get("/api/transactions")
-def get_transactions(limit: int = 100):
-    return fetch_recent_transactions(limit)
+
 
