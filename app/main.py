@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 import json
@@ -10,40 +10,41 @@ from app.core.async_queue import transaction_queue
 from app.core.async_worker import start_worker
 from app.core.redis_client import redis_client
 
-# --------------------------------------------------
+# ==================================================
 # App init
-# --------------------------------------------------
+# ==================================================
 app = FastAPI(
     title="UPI Fraud Detection Engine – Async",
-    version="1.0.0"
+    version="1.1.0"
 )
 
-# --------------------------------------------------
-# CORS (for Streamlit & Render)
-# --------------------------------------------------
+# ==================================================
+# CORS (Frontend + Render safe)
+# ==================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten later
+    allow_origins=["*"],   # restrict later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --------------------------------------------------
+# ==================================================
 # API Key security
-# --------------------------------------------------
+# ==================================================
 API_KEY = os.getenv("API_KEY", "upi_fraud_prod_2026_secure_key")
 
 def verify_api_key(x_api_key: Optional[str] = Header(None)):
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-# --------------------------------------------------
+# ==================================================
 # Transaction Schema
-# --------------------------------------------------
+# ==================================================
 class TransactionRequest(BaseModel):
-    tx_id: str
-    amount: float
+    tx_id: str = Field(..., min_length=4)
+    amount: float = Field(..., gt=0)
+
     sender_vpa: str
     receiver_vpa: str
 
@@ -58,16 +59,16 @@ class TransactionRequest(BaseModel):
 
     timestamp: Optional[str] = None
 
-# --------------------------------------------------
+# ==================================================
 # Startup – async worker
-# --------------------------------------------------
+# ==================================================
 @app.on_event("startup")
 def startup_event():
     start_worker()
 
-# --------------------------------------------------
+# ==================================================
 # Health check
-# --------------------------------------------------
+# ==================================================
 @app.get("/")
 def health_check():
     return {
@@ -76,9 +77,9 @@ def health_check():
         "mode": "async"
     }
 
-# --------------------------------------------------
-# Decision API (producer)
-# --------------------------------------------------
+# ==================================================
+# Decision API (Producer)
+# ==================================================
 @app.post("/v1/decision")
 def submit_transaction(
     tx: TransactionRequest,
@@ -103,22 +104,26 @@ def submit_transaction(
     }
 
 # ==================================================
-# DASHBOARD / ANALYTICS APIs
+# DATA KEYS (MUST MATCH WORKER)
+# ==================================================
+REDIS_TX_KEY = "recent_transactions"
+REVIEW_QUEUE_KEY = "review_queue"
+
+# ==================================================
+# DASHBOARD APIs
 # ==================================================
 
-REDIS_TX_KEY = "recent_transactions"   # 🔥 MUST MATCH WORKER
-
-# --------------------------------------------------
-# Transactions (table)
-# --------------------------------------------------
+# ------------------------------
+# Transactions table
+# ------------------------------
 @app.get("/api/transactions")
 def get_transactions(limit: int = 200):
     raw = redis_client.lrange(REDIS_TX_KEY, 0, limit - 1)
     return [json.loads(r) for r in raw]
 
-# --------------------------------------------------
-# Analytics: stats
-# --------------------------------------------------
+# ------------------------------
+# Analytics: summary stats
+# ------------------------------
 @app.get("/api/analytics/stats")
 def analytics_stats():
     txs = [json.loads(r) for r in redis_client.lrange(REDIS_TX_KEY, 0, -1)]
@@ -133,26 +138,71 @@ def analytics_stats():
         "fraud_rate": rate
     }
 
-# --------------------------------------------------
+# ------------------------------
 # Analytics: decision split
-# --------------------------------------------------
+# ------------------------------
 @app.get("/api/analytics/decision-split")
 def analytics_decision_split():
     txs = [json.loads(r) for r in redis_client.lrange(REDIS_TX_KEY, 0, -1)]
 
     return {
         "ALLOW": sum(1 for t in txs if t.get("decision") == "ALLOW"),
-        "BLOCK": sum(1 for t in txs if t.get("decision") == "BLOCK"),
         "REVIEW": sum(1 for t in txs if t.get("decision") == "REVIEW"),
+        "BLOCK": sum(1 for t in txs if t.get("decision") == "BLOCK"),
     }
 
-# --------------------------------------------------
-# Analytics: risk score distribution
-# --------------------------------------------------
+# ------------------------------
+# Analytics: risk distribution
+# ------------------------------
 @app.get("/api/analytics/risk-distribution")
 def analytics_risk_distribution():
     txs = [json.loads(r) for r in redis_client.lrange(REDIS_TX_KEY, 0, -1)]
     return [t.get("risk_score", 0) for t in txs]
+
+# ==================================================
+# REVIEW MANAGEMENT (INDUSTRY FEATURE)
+# ==================================================
+
+@app.get("/api/review/queue")
+def get_review_queue(limit: int = 50):
+    raw = redis_client.lrange(REVIEW_QUEUE_KEY, 0, limit - 1)
+    return [json.loads(r) for r in raw]
+
+
+@app.post("/api/review/decision")
+def review_decision(
+    tx_id: str,
+    decision: str
+):
+    if decision not in ("ALLOW", "BLOCK"):
+        raise HTTPException(status_code=400, detail="Invalid decision")
+
+    redis_client.lpush(
+        "review_decisions",
+        json.dumps({
+            "tx_id": tx_id,
+            "final_decision": decision,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+    )
+
+    return {
+        "status": "UPDATED",
+        "tx_id": tx_id,
+        "decision": decision
+    }
+
+# ==================================================
+# METRICS / OBSERVABILITY (EXECUTIVE VIEW)
+# ==================================================
+@app.get("/api/metrics")
+def metrics():
+    return {
+        "total_transactions": int(redis_client.get("metric:total_transactions") or 0),
+        "allow": int(redis_client.get("metric:decision:ALLOW") or 0),
+        "review": int(redis_client.get("metric:decision:REVIEW") or 0),
+        "block": int(redis_client.get("metric:decision:BLOCK") or 0),
+    }
 
 
 
