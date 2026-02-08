@@ -1,12 +1,16 @@
 import streamlit as st
 import requests
 import pandas as pd
+from datetime import datetime
 
-# --------------------------------------------------
+# ==================================================
 # CONFIG
-# --------------------------------------------------
-BACKEND_URL = "https://upi-fraud-detection-7bot.onrender.com/"   # 🔴 CHANGE THIS
-REFRESH_SEC = 5
+# ==================================================
+BACKEND_URL = "https://upi-fraud-detection-7bot.onrender.com"
+
+HEADERS = {
+    "Content-Type": "application/json"
+}
 
 st.set_page_config(
     page_title="UPI Fraud Analytics Dashboard",
@@ -15,69 +19,114 @@ st.set_page_config(
 
 st.title("🛡️ UPI Fraud Analytics Dashboard")
 
-# --------------------------------------------------
-# DATA LOADERS
-# --------------------------------------------------
-@st.cache_data(ttl=REFRESH_SEC)
-def load_transactions():
-    res = requests.get(f"{BACKEND_URL}/api/transactions", timeout=10)
-    res.raise_for_status()
-    return pd.DataFrame(res.json())
+# ==================================================
+# HELPERS
+# ==================================================
+def safe_get(url: str):
+    """
+    Makes a GET call and returns JSON safely.
+    Never crashes the dashboard.
+    """
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        if res.status_code != 200:
+            return None, f"{url} returned {res.status_code}"
+        return res.json(), None
+    except Exception as e:
+        return None, str(e)
 
-@st.cache_data(ttl=REFRESH_SEC)
-def load_stats():
-    res = requests.get(f"{BACKEND_URL}/api/analytics/stats", timeout=10)
-    res.raise_for_status()
-    return res.json()
 
-# --------------------------------------------------
-# FETCH DATA
-# --------------------------------------------------
-try:
-    df = load_transactions()
-    stats = load_stats()
-except Exception:
+# ==================================================
+# BACKEND HEALTH CHECK
+# ==================================================
+health, err = safe_get(f"{BACKEND_URL}/")
+
+if health is None:
     st.error("Backend not reachable. Please check backend URL.")
+    st.write(err)
     st.stop()
 
-# --------------------------------------------------
+# ==================================================
+# LOAD DATA (SAFE)
+# ==================================================
+txs, tx_err = safe_get(f"{BACKEND_URL}/api/transactions")
+stats, stats_err = safe_get(f"{BACKEND_URL}/api/analytics/stats")
+decision_split, ds_err = safe_get(f"{BACKEND_URL}/api/analytics/decision-split")
+risk_dist, rd_err = safe_get(f"{BACKEND_URL}/api/analytics/risk-distribution")
+
+# ==================================================
+# WARNINGS (NON-BLOCKING)
+# ==================================================
+if tx_err:
+    st.warning("Transactions API issue")
+    st.write(tx_err)
+
+if stats_err:
+    st.warning("Stats API issue")
+    st.write(stats_err)
+
+if ds_err:
+    st.warning("Decision split API issue")
+    st.write(ds_err)
+
+if rd_err:
+    st.warning("Risk distribution API issue")
+    st.write(rd_err)
+
+# ==================================================
 # METRICS
-# --------------------------------------------------
-c1, c2, c3 = st.columns(3)
+# ==================================================
+col1, col2, col3 = st.columns(3)
 
-c1.metric("Total Transactions", stats["total_transactions"])
-c2.metric("Fraud Transactions", stats["fraud_transactions"])
-c3.metric("Fraud Rate (%)", stats["fraud_rate"])
+total_tx = stats.get("total_transactions", 0) if stats else 0
+fraud_tx = stats.get("fraud_transactions", 0) if stats else 0
+fraud_rate = stats.get("fraud_rate", 0) if stats else 0
 
-st.divider()
-
-# --------------------------------------------------
-# CHARTS (PRODUCT-LEVEL)
-# --------------------------------------------------
-if not df.empty:
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Fraud Decision Distribution")
-        st.bar_chart(df["decision"].value_counts())
-
-    with col2:
-        st.subheader("Risk Score Distribution")
-        st.bar_chart(df["risk_score"])
+col1.metric("Total Transactions", total_tx)
+col2.metric("Fraud Transactions", fraud_tx)
+col3.metric("Fraud Rate (%)", fraud_rate)
 
 st.divider()
 
-# --------------------------------------------------
-# TABLE
-# --------------------------------------------------
+# ==================================================
+# CHARTS
+# ==================================================
+col4, col5 = st.columns(2)
+
+with col4:
+    st.subheader("Decision Split")
+    if decision_split:
+        st.bar_chart(decision_split)
+    else:
+        st.info("No decision data available")
+
+with col5:
+    st.subheader("Risk Score Distribution")
+    if risk_dist and len(risk_dist) > 0:
+        st.bar_chart(pd.Series(risk_dist).value_counts().sort_index())
+    else:
+        st.info("No risk data available")
+
+st.divider()
+
+# ==================================================
+# TRANSACTIONS TABLE
+# ==================================================
 st.subheader("Recent Transactions")
 
-if df.empty:
-    st.warning("No transactions yet. Send transactions via API.")
+if not txs:
+    st.info("No transactions processed yet.")
 else:
+    df = pd.DataFrame(txs)
+
+    # Ensure timestamp readable
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
     st.dataframe(df, use_container_width=True)
 
-st.caption(f"Auto-refresh every {REFRESH_SEC} seconds")
+st.caption(f"Last refresh: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+
 
 
 
