@@ -10,23 +10,16 @@ from app.core.audit_logger import log_decision
 from app.core.redis_client import redis_client
 
 engine = ProductionFraudEngine()
-
 REDIS_TX_KEY = "recent_transactions"
 
 
-def normalize_result(result: dict):
-    """
-    🔥 GUARANTEE REQUIRED KEYS
-    """
-    decision = result.get("action") or result.get("decision") or "ALLOW"
-
+def normalize(raw: dict):
     return {
-        "decision": decision,
-        "risk_score": result.get("risk_score", 0),
-        "confidence": result.get("confidence", 0.5),
-        "reason": ",".join(result.get("top_risk_factors", []))
-        if result.get("top_risk_factors")
-        else result.get("reason")
+        "decision": raw.get("action") or raw.get("decision") or "ALLOW",
+        "risk_score": raw.get("risk_score", 0),
+        "confidence": raw.get("confidence", 0.5),
+        "reason": ",".join(raw.get("top_risk_factors", []))
+        if raw.get("top_risk_factors") else raw.get("reason")
     }
 
 
@@ -39,9 +32,6 @@ def worker_loop():
         try:
             db = next(get_db())
 
-            # -------------------------------
-            # DUPLICATE TX
-            # -------------------------------
             if check_duplicate_tx(tx.tx_id):
                 raw = {
                     "action": "BLOCK",
@@ -49,11 +39,8 @@ def worker_loop():
                     "confidence": 0.99,
                     "top_risk_factors": ["DUPLICATE_TRANSACTION"]
                 }
-                result = normalize_result(raw)
+                result = normalize(raw)
 
-            # -------------------------------
-            # VELOCITY
-            # -------------------------------
             elif check_tx_velocity(tx.sender_vpa):
                 raw = {
                     "action": "BLOCK",
@@ -62,26 +49,19 @@ def worker_loop():
                     "top_risk_factors": ["HIGH_TX_VELOCITY"]
                 }
                 increase_risk(tx.sender_vpa, tx.receiver_vpa, 30)
-                result = normalize_result(raw)
+                result = normalize(raw)
 
-            # -------------------------------
-            # CORE ENGINE
-            # -------------------------------
             else:
                 raw = engine.evaluate_transaction(tx)
-                result = normalize_result(raw)
+                result = normalize(raw)
 
                 if result["decision"] == "BLOCK":
                     increase_risk(tx.sender_vpa, tx.receiver_vpa, 25)
 
-            # -------------------------------
-            # SAVE TO DB
-            # -------------------------------
+            # DB write
             log_decision(tx, result, db)
 
-            # -------------------------------
-            # 🔥 PUSH TO REDIS (THIS WAS MISSING)
-            # -------------------------------
+            # 🔥 Redis push
             redis_client.lpush(
                 REDIS_TX_KEY,
                 json.dumps({
@@ -106,6 +86,7 @@ def worker_loop():
 def start_worker():
     t = threading.Thread(target=worker_loop, daemon=True)
     t.start()
+
 
 
 
