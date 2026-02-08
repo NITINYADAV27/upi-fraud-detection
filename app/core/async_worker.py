@@ -1,5 +1,6 @@
 import threading
 import json
+import time
 
 from app.core.async_queue import transaction_queue
 from app.core.fraud_engine import ProductionFraudEngine
@@ -10,10 +11,15 @@ from app.core.audit_logger import log_decision
 from app.core.redis_client import redis_client
 
 engine = ProductionFraudEngine()
+
 REDIS_TX_KEY = "recent_transactions"
+REVIEW_QUEUE_KEY = "review_queue"
 
 
 def normalize(raw: dict):
+    """
+    Normalize engine output into DB / Redis safe format
+    """
     return {
         "decision": raw.get("action") or raw.get("decision") or "ALLOW",
         "risk_score": raw.get("risk_score", 0),
@@ -29,9 +35,14 @@ def worker_loop():
     while True:
         tx = transaction_queue.get()
 
+        start_time = time.time()
+
         try:
             db = next(get_db())
 
+            # --------------------------------------------------
+            # 1️⃣ Duplicate transaction protection
+            # --------------------------------------------------
             if check_duplicate_tx(tx.tx_id):
                 raw = {
                     "action": "BLOCK",
@@ -41,6 +52,9 @@ def worker_loop():
                 }
                 result = normalize(raw)
 
+            # --------------------------------------------------
+            # 2️⃣ Velocity protection
+            # --------------------------------------------------
             elif check_tx_velocity(tx.sender_vpa):
                 raw = {
                     "action": "BLOCK",
@@ -51,6 +65,9 @@ def worker_loop():
                 increase_risk(tx.sender_vpa, tx.receiver_vpa, 30)
                 result = normalize(raw)
 
+            # --------------------------------------------------
+            # 3️⃣ Core fraud engine
+            # --------------------------------------------------
             else:
                 raw = engine.evaluate_transaction(tx)
                 result = normalize(raw)
@@ -58,10 +75,19 @@ def worker_loop():
                 if result["decision"] == "BLOCK":
                     increase_risk(tx.sender_vpa, tx.receiver_vpa, 25)
 
-            # DB write
+            # --------------------------------------------------
+            # 4️⃣ Latency measurement
+            # --------------------------------------------------
+            latency_ms = round((time.time() - start_time) * 1000, 2)
+
+            # --------------------------------------------------
+            # 5️⃣ DB audit log
+            # --------------------------------------------------
             log_decision(tx, result, db)
 
-            # 🔥 Redis push
+            # --------------------------------------------------
+            # 6️⃣ Redis push (hot data)
+            # --------------------------------------------------
             redis_client.lpush(
                 REDIS_TX_KEY,
                 json.dumps({
@@ -72,9 +98,34 @@ def worker_loop():
                     "decision": result["decision"],
                     "risk_score": result["risk_score"],
                     "confidence": result["confidence"],
+                    "latency_ms": latency_ms,
                     "timestamp": tx.timestamp
                 })
             )
+
+            # Keep only recent 1000 transactions
+            redis_client.ltrim(REDIS_TX_KEY, 0, 999)
+
+            # --------------------------------------------------
+            # 7️⃣ REVIEW workflow (industry feature)
+            # --------------------------------------------------
+            if result["decision"] == "REVIEW":
+                redis_client.lpush(
+                    REVIEW_QUEUE_KEY,
+                    json.dumps({
+                        "tx_id": tx.tx_id,
+                        "sender_vpa": tx.sender_vpa,
+                        "amount": tx.amount,
+                        "risk_score": result["risk_score"],
+                        "timestamp": tx.timestamp
+                    })
+                )
+
+            # --------------------------------------------------
+            # 8️⃣ Metrics (observability)
+            # --------------------------------------------------
+            redis_client.incr("metric:total_transactions")
+            redis_client.incr(f"metric:decision:{result['decision']}")
 
         except Exception as e:
             print("❌ Worker error:", e)
@@ -86,6 +137,8 @@ def worker_loop():
 def start_worker():
     t = threading.Thread(target=worker_loop, daemon=True)
     t.start()
+
+
 
 
 
