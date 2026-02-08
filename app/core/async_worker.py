@@ -1,4 +1,5 @@
 import threading
+import json
 
 from app.core.async_queue import transaction_queue
 from app.core.fraud_engine import ProductionFraudEngine
@@ -6,19 +7,27 @@ from app.core.redis_guard import check_duplicate_tx, check_tx_velocity
 from app.core.risk_memory import increase_risk
 from app.core.database import get_db
 from app.core.audit_logger import log_decision
+from app.core.redis_client import redis_client
 
 engine = ProductionFraudEngine()
 
+REDIS_TX_KEY = "recent_transactions"
 
-def _extract_reason(result: dict):
+
+def normalize_result(result: dict):
     """
-    Convert internal risk factors into a single DB-safe reason string.
+    🔥 GUARANTEE REQUIRED KEYS
     """
-    if result.get("top_risk_factors"):
-        return ",".join(result["top_risk_factors"])
-    if result.get("reason"):
-        return result["reason"]
-    return None
+    decision = result.get("action") or result.get("decision") or "ALLOW"
+
+    return {
+        "decision": decision,
+        "risk_score": result.get("risk_score", 0),
+        "confidence": result.get("confidence", 0.5),
+        "reason": ",".join(result.get("top_risk_factors", []))
+        if result.get("top_risk_factors")
+        else result.get("reason")
+    }
 
 
 def worker_loop():
@@ -28,77 +37,63 @@ def worker_loop():
         tx = transaction_queue.get()
 
         try:
-            # DB session (generator → actual session)
             db = next(get_db())
 
-            # --------------------------------------------------
-            # 1️⃣ Duplicate transaction protection
-            # --------------------------------------------------
+            # -------------------------------
+            # DUPLICATE TX
+            # -------------------------------
             if check_duplicate_tx(tx.tx_id):
-                result = {
+                raw = {
                     "action": "BLOCK",
                     "risk_score": 95,
                     "confidence": 0.99,
                     "top_risk_factors": ["DUPLICATE_TRANSACTION"]
                 }
+                result = normalize_result(raw)
 
-                log_decision(
-                    tx=tx,
-                    result={
-                        "decision": "BLOCK",
-                        "risk_score": result["risk_score"],
-                        "confidence": result["confidence"],
-                        "reason": _extract_reason(result)
-                    },
-                    db=db
-                )
-                continue
-
-            # --------------------------------------------------
-            # 2️⃣ Velocity protection
-            # --------------------------------------------------
-            if check_tx_velocity(tx.sender_vpa):
-                result = {
+            # -------------------------------
+            # VELOCITY
+            # -------------------------------
+            elif check_tx_velocity(tx.sender_vpa):
+                raw = {
                     "action": "BLOCK",
                     "risk_score": 90,
                     "confidence": 0.95,
                     "top_risk_factors": ["HIGH_TX_VELOCITY"]
                 }
-
                 increase_risk(tx.sender_vpa, tx.receiver_vpa, 30)
+                result = normalize_result(raw)
 
-                log_decision(
-                    tx=tx,
-                    result={
-                        "decision": "BLOCK",
-                        "risk_score": result["risk_score"],
-                        "confidence": result["confidence"],
-                        "reason": _extract_reason(result)
-                    },
-                    db=db
-                )
-                continue
+            # -------------------------------
+            # CORE ENGINE
+            # -------------------------------
+            else:
+                raw = engine.evaluate_transaction(tx)
+                result = normalize_result(raw)
 
-            # --------------------------------------------------
-            # 3️⃣ Core fraud engine
-            # --------------------------------------------------
-            result = engine.evaluate_transaction(tx)
+                if result["decision"] == "BLOCK":
+                    increase_risk(tx.sender_vpa, tx.receiver_vpa, 25)
 
-            # ✅ SAFE normalization (action OR decision)
-            decision = result.get("action") or result.get("decision")
+            # -------------------------------
+            # SAVE TO DB
+            # -------------------------------
+            log_decision(tx, result, db)
 
-            if decision == "BLOCK":
-                increase_risk(tx.sender_vpa, tx.receiver_vpa, 25)
-
-            log_decision(
-                tx=tx,
-                result={
-                    "decision": decision,              # ✅ FIXED
+            # -------------------------------
+            # 🔥 PUSH TO REDIS (THIS WAS MISSING)
+            # -------------------------------
+            redis_client.lpush(
+                REDIS_TX_KEY,
+                json.dumps({
+                    "tx_id": tx.tx_id,
+                    "amount": tx.amount,
+                    "sender_vpa": tx.sender_vpa,
+                    "receiver_vpa": tx.receiver_vpa,
+                    "decision": result["decision"],
                     "risk_score": result["risk_score"],
                     "confidence": result["confidence"],
-                    "reason": _extract_reason(result)
-                },
-                db=db
+                    "timestamp": tx.timestamp
+                })
             )
 
         except Exception as e:
@@ -111,6 +106,7 @@ def worker_loop():
 def start_worker():
     t = threading.Thread(target=worker_loop, daemon=True)
     t.start()
+
 
 
 
