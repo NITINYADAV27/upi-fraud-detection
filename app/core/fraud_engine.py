@@ -102,6 +102,18 @@ class ProductionFraudEngine:
         if tx.avg_tx_30d > 0 and tx.amount > (tx.avg_tx_30d * 3):
             risk_score += self.RISK_WEIGHTS["AMOUNT_SPIKE"]
             risk_factors.append("AMOUNT_SPIKE")
+        # --------------------------------------------------
+        # POSITIVE TRUST SIGNALS (RISK REDUCTION)
+        # --------------------------------------------------
+        if tx.account_age_days > 365:
+            risk_score -= 10
+            risk_factors.append("OLD_ACCOUNT_TRUST")
+
+        if tx.avg_tx_30d > 0 and tx.amount <= tx.avg_tx_30d:
+            risk_score -= 10
+            risk_factors.append("NORMAL_SPEND_BEHAVIOR")
+
+            risk_score = max(risk_score, 0)
 
         # --------------------------------------------------
         # Normalize
@@ -125,5 +137,6 @@ class ProductionFraudEngine:
             "confidence": confidence,
             "top_risk_factors": risk_factors
         }
+
 
 
