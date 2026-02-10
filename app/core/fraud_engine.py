@@ -1,11 +1,13 @@
 import os
+from app.core.onnx_engine import ONNXFraudModel
 
 
 class ProductionFraudEngine:
     """
-    Industry-grade rule-based fraud engine
+    Industry-grade hybrid fraud engine
+    Rules = deterministic authority
+    ONNX ML = probabilistic risk amplifier
     Decisions: ALLOW / REVIEW / BLOCK
-    Explainable, deterministic, configurable, production-safe
     """
 
     # ==================================================
@@ -34,7 +36,7 @@ class ProductionFraudEngine:
     }
 
     # ==================================================
-    # TRUST / POSITIVE SIGNALS
+    # TRUST SIGNALS
     # ==================================================
     TRUST_WEIGHTS = {
         "OLD_ACCOUNT_TRUST": 10,
@@ -42,13 +44,25 @@ class ProductionFraudEngine:
     }
 
     # ==================================================
-    # DECISION POLICY (ENV OVERRIDABLE)
+    # POLICY (ENV OVERRIDABLE)
     # ==================================================
     ALLOW_MAX_RISK = int(os.getenv("ALLOW_MAX_RISK", 30))
     REVIEW_MAX_RISK = int(os.getenv("REVIEW_MAX_RISK", 70))
     MIN_ALLOW_CONFIDENCE = float(os.getenv("MIN_ALLOW_CONFIDENCE", 0.75))
 
-    MAX_TRUST_REDUCTION = 20   # prevents trust abuse
+    # ML thresholds (industry defaults)
+    ML_BLOCK_THRESHOLD = float(os.getenv("ML_BLOCK_THRESHOLD", 0.85))
+    ML_REVIEW_THRESHOLD = float(os.getenv("ML_REVIEW_THRESHOLD", 0.45))
+
+    MAX_TRUST_REDUCTION = 20
+
+    # ==================================================
+    # INIT
+    # ==================================================
+    def __init__(self):
+        self.ml = ONNXFraudModel(
+            os.getenv("ONNX_MODEL_PATH", "fraud_model.onnx")
+        )
 
     # ==================================================
     # CORE EVALUATION
@@ -59,100 +73,127 @@ class ProductionFraudEngine:
         risk_factors = []
 
         # --------------------------------------------------
-        # RISK CONTRIBUTION RULES
+        # RULE-BASED RISK
         # --------------------------------------------------
         if tx.amount >= 20000:
-            risk_score += self.RISK_WEIGHTS["HIGH_AMOUNT"]
+            risk_score += 40
             risk_factors.append(("HIGH_AMOUNT", +40))
         elif tx.amount >= 10000:
-            risk_score += self.RISK_WEIGHTS["MEDIUM_AMOUNT"]
+            risk_score += 20
             risk_factors.append(("MEDIUM_AMOUNT", +20))
 
         if tx.failed_pin_attempts >= 3:
-            risk_score += self.RISK_WEIGHTS["FAILED_PIN_HIGH"]
+            risk_score += 30
             risk_factors.append(("FAILED_PIN_HIGH", +30))
         elif tx.failed_pin_attempts == 2:
-            risk_score += self.RISK_WEIGHTS["FAILED_PIN_MED"]
+            risk_score += 15
             risk_factors.append(("FAILED_PIN_MED", +15))
 
         if tx.geo_risk_score >= 80:
-            risk_score += self.RISK_WEIGHTS["HIGH_GEO"]
+            risk_score += 30
             risk_factors.append(("HIGH_GEO", +30))
         elif tx.geo_risk_score >= 50:
-            risk_score += self.RISK_WEIGHTS["MEDIUM_GEO"]
+            risk_score += 15
             risk_factors.append(("MEDIUM_GEO", +15))
 
         if tx.account_age_days < 30:
-            risk_score += self.RISK_WEIGHTS["NEW_ACCOUNT"]
+            risk_score += 25
             risk_factors.append(("NEW_ACCOUNT", +25))
         elif tx.account_age_days < 90:
-            risk_score += self.RISK_WEIGHTS["RECENT_ACCOUNT"]
+            risk_score += 10
             risk_factors.append(("RECENT_ACCOUNT", +10))
 
         if tx.first_time_payee:
-            risk_score += self.RISK_WEIGHTS["FIRST_TIME_PAYEE"]
+            risk_score += 20
             risk_factors.append(("FIRST_TIME_PAYEE", +20))
 
         if tx.tx_velocity_5m >= 5:
-            risk_score += self.RISK_WEIGHTS["HIGH_TX_VELOCITY"]
+            risk_score += 25
             risk_factors.append(("HIGH_TX_VELOCITY", +25))
         elif tx.tx_velocity_5m >= 3:
-            risk_score += self.RISK_WEIGHTS["MEDIUM_TX_VELOCITY"]
+            risk_score += 15
             risk_factors.append(("MEDIUM_TX_VELOCITY", +15))
 
         if tx.device_velocity >= 5:
-            risk_score += self.RISK_WEIGHTS["DEVICE_CHANGE"]
+            risk_score += 20
             risk_factors.append(("DEVICE_CHANGE", +20))
 
         if tx.avg_tx_30d > 0 and tx.amount > (tx.avg_tx_30d * 3):
-            risk_score += self.RISK_WEIGHTS["AMOUNT_SPIKE"]
+            risk_score += 20
             risk_factors.append(("AMOUNT_SPIKE", +20))
 
         # --------------------------------------------------
-        # TRUST / RISK DAMPENING
+        # TRUST REDUCTION
         # --------------------------------------------------
         if tx.account_age_days > 365:
-            trust_score += self.TRUST_WEIGHTS["OLD_ACCOUNT_TRUST"]
+            trust_score += 10
             risk_factors.append(("OLD_ACCOUNT_TRUST", -10))
 
         if tx.avg_tx_30d > 0 and tx.amount <= tx.avg_tx_30d:
-            trust_score += self.TRUST_WEIGHTS["NORMAL_SPEND_BEHAVIOR"]
+            trust_score += 10
             risk_factors.append(("NORMAL_SPEND_BEHAVIOR", -10))
 
         trust_score = min(trust_score, self.MAX_TRUST_REDUCTION)
         risk_score = max(risk_score - trust_score, 0)
-
-        # --------------------------------------------------
-        # NORMALIZATION & CONFIDENCE
-        # --------------------------------------------------
         risk_score = min(risk_score, 100)
 
-        # calibrated confidence (non-linear, realistic)
+        # --------------------------------------------------
+        # CONFIDENCE
+        # --------------------------------------------------
         confidence = round(max(0.05, 1 - (risk_score / 125)), 2)
 
         # --------------------------------------------------
-        # DECISION POLICY
+        # ML SCORING (FAIL-OPEN)
         # --------------------------------------------------
-        if risk_score <= self.ALLOW_MAX_RISK and confidence >= self.MIN_ALLOW_CONFIDENCE:
-            decision = "ALLOW"
-        elif risk_score <= self.REVIEW_MAX_RISK:
-            decision = "REVIEW"
-        else:
+        features = [
+            tx.amount,
+            tx.geo_risk_score,
+            tx.failed_pin_attempts,
+            tx.account_age_days,
+            tx.tx_velocity_5m,
+            tx.device_velocity,
+            tx.avg_tx_30d,
+            int(tx.first_time_payee)
+        ]
+
+        ml_score = self.ml.predict_proba(features)
+
+        # --------------------------------------------------
+        # FINAL DECISION POLICY (RULES FIRST)
+        # --------------------------------------------------
+        if ml_score >= self.ML_BLOCK_THRESHOLD:
             decision = "BLOCK"
+            risk_factors.append(("ML_HIGH_RISK", +int(ml_score * 100)))
+
+        elif ml_score >= self.ML_REVIEW_THRESHOLD:
+            decision = "REVIEW"
+            risk_factors.append(("ML_MEDIUM_RISK", +int(ml_score * 100)))
+
+        else:
+            if risk_score <= self.ALLOW_MAX_RISK and confidence >= self.MIN_ALLOW_CONFIDENCE:
+                decision = "ALLOW"
+            elif risk_score <= self.REVIEW_MAX_RISK:
+                decision = "REVIEW"
+            else:
+                decision = "BLOCK"
 
         # --------------------------------------------------
         # EXPLAINABILITY (ORDERED)
         # --------------------------------------------------
         explainable_factors = [
-            f"{name}({impact:+d})" for name, impact in sorted(
+            f"{name}({impact:+d})"
+            for name, impact in sorted(
                 risk_factors, key=lambda x: abs(x[1]), reverse=True
             )
         ]
 
         return {
             "action": decision,
-            "risk_score": risk_score,
-            "confidence": confidence,
+            "risk_score": max(risk_score, int(ml_score * 100)),
+            "confidence": round(1 - ml_score, 2),
+            "ml_score": round(ml_score, 4),
             "top_risk_factors": explainable_factors
         }
+
+
 
