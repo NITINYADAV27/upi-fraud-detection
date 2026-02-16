@@ -1,16 +1,16 @@
 fastapi==0.104.1
 uvicorn==0.24.0
 
-# ML Core
-scikit-learn==1.3.0
-numpy==1.24.4
+# ML
+scikit-learn==1.3.2
+numpy==1.24.3
 pandas==2.1.4
 joblib==1.3.2
 
-# ONNX (Render Stable)
-onnx==1.14.0
-onnxruntime==1.16.3
-skl2onnx==1.15.0
+# ONNX (COMPATIBLE WITH RENDER)
+onnx==1.13.1
+onnxruntime==1.15.1
+skl2onnx==1.14.1
 
 # Infra
 redis==5.0.1
